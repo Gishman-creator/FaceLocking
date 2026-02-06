@@ -10,9 +10,8 @@ except ImportError:
     mp = None
 
 from . import config
-from .haar_5pt import HaarMediaPipeFaceDetector, FaceDetection
-from .align import FaceAligner
-from .embed import ArcFaceEmbedder
+from .haar_5pt import Haar5ptDetector, align_face_5pt
+from .embed import ArcFaceEmbedderONNX
 
 
 def load_database():
@@ -58,6 +57,7 @@ def get_full_landmarks(frame):
         return None
     H, W = frame.shape[:2]
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Note: Creating FaceMesh each frame is slow, but we keep it for separate logic compatibility
     mesh = mp.solutions.face_mesh.FaceMesh(
         static_image_mode=False,
         max_num_faces=1,
@@ -142,9 +142,11 @@ def main():
     config.ensure_dirs()
     config.HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
-    detector = HaarMediaPipeFaceDetector(min_size=config.HAAR_MIN_SIZE)
-    aligner = FaceAligner()
-    embedder = ArcFaceEmbedder(config.ARCFACE_MODEL_PATH)
+    detector = Haar5ptDetector(min_size=config.HAAR_MIN_SIZE, smooth_alpha=0.8, debug=False)
+    # Note: Haar5ptDetector returns FaceKpsBox objects, which have .kps (5 keypoints)
+    
+    embedder = ArcFaceEmbedderONNX(config.ARCFACE_MODEL_PATH)
+    
     embeddings_matrix = np.stack([db[n].reshape(-1) for n in names], axis=0)
     lock_idx = names.index(lock_identity)
     threshold = config.DEFAULT_DISTANCE_THRESHOLD
@@ -187,15 +189,19 @@ def main():
 
             vis = frame.copy()
             H, W = frame.shape[:2]
-            faces = detector.detect(frame)
+            faces = detector.detect(frame, max_faces=5)
 
             if not locked:
                 for face in faces:
-                    aligned, _ = aligner.align(frame, face.landmarks)
-                    query_emb, _ = embedder.embed(aligned)
+                    # align_face_5pt uses face.kps
+                    aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
+                    res = embedder.embed(aligned)
+                    query_emb = res.embedding
+                    
                     dists = np.array([cosine_distance(query_emb, embeddings_matrix[i]) for i in range(len(names))])
                     best_idx = int(np.argmin(dists))
                     best_dist = dists[best_idx]
+                    
                     if best_idx == lock_idx and best_dist <= threshold:
                         locked = True
                         fail_count = 0
@@ -217,11 +223,14 @@ def main():
                 matched_face = None
                 best_dist = 1.0
                 for face in faces:
-                    aligned, _ = aligner.align(frame, face.landmarks)
-                    query_emb, _ = embedder.embed(aligned)
+                    aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
+                    res = embedder.embed(aligned)
+                    query_emb = res.embedding
+                    
                     dists = np.array([cosine_distance(query_emb, embeddings_matrix[i]) for i in range(len(names))])
                     idx = int(np.argmin(dists))
                     d = dists[idx]
+                    
                     if idx == lock_idx and d <= threshold:
                         matched_face = face
                         best_dist = d
@@ -250,9 +259,9 @@ def main():
                         frame, prev_center_x, center_x, prev_ear, prev_mouth_width,
                         baseline_mouth_width, frame_idx, last_action_frame
                     )
-                    ts = time.time()
+                    ts_val = time.time()
                     for action_type, desc in action_list:
-                        line = "%.2f  %s  %s\n" % (ts, action_type, desc)
+                        line = "%.2f  %s  %s\n" % (ts_val, action_type, desc)
                         if history_file:
                             history_file.write(line)
                             history_file.flush()
