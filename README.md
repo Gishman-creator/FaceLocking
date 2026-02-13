@@ -12,8 +12,8 @@ Open your terminal and run:
 
 ```bash
 # Clone the repository
-git clone https://github.com/humuraelvin/Face-Recog-onnx.git
-cd Face-Recog-onnx
+git clone https://github.com/Gishman-creator/FaceLocking
+cd FaceLocking
 
 # Create virtual environment
 python -m venv .venv
